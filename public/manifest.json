@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Website Auth Helper",
+  "description": "捕获已授权自有网站的登录 Token（Storage 扫描），可同步到自建后端。仅在用户配置的站点上生效。",
+  "version": "0.1.0",
+  "permissions": ["storage", "scripting", "tabs"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Website Auth Helper"
+  },
+  "options_page": "options.html",
+  "icons": {}
+}
