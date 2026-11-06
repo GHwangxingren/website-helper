@@ -3,5 +3,18 @@ dist/
 *.log
 .DS_Store
 .workbuddy/
+
+# 沙箱环境临时探测文件（不入库）
 .git_out*.txt
 .git_check.txt
+.git_probe*.txt
+.git_so.txt
+.git_se.txt
+.git_rc.txt
+.git_comb.txt
+.git_ls2.txt
+.gh_check*.txt
+.push_*.txt
+git_status*.txt
+git_branch.txt
+remaining.txt
