@@ -18,3 +18,5 @@ dist/
 git_status*.txt
 git_branch.txt
 remaining.txt
+build_log*.txt
+proxy_check.txt
