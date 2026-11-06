@@ -58,6 +58,7 @@ export async function syncSite(siteId, tokens) {
     const ok = resp.ok
     await updateSite(siteId, {
       syncState: {
+        ...site.syncState,
         status: ok ? 'SYNCED' : 'FAILED',
         lastSyncAt: new Date().toISOString(),
         lastError: ok ? null : `HTTP ${resp.status}`,

@@ -22,8 +22,6 @@ const checkedCandidates = ref({}) // candidateIndex -> true
 const sites = computed(() => (config.value ? config.value.sites : []))
 const selectedSite = computed(() => sites.value.find((s) => s.id === selectedSiteId.value) || null)
 
-const CONFIG_KEY = 'appConfig'
-
 async function loadState() {
   const resp = await chrome.runtime.sendMessage({ type: 'GET_STATE' })
   if (resp.ok) {
@@ -41,13 +39,13 @@ onMounted(loadState)
 async function saveGlobal() {
   savingGlobal.value = true
   globalMsg.value = ''
-  const cfg = { ...config.value }
+  const cfg = JSON.parse(JSON.stringify(config.value))
   if (cfg.receiverUrl && !/^https?:\/\//.test(cfg.receiverUrl)) {
     globalMsg.value = '接口地址需以 http:// 或 https:// 开头'
     savingGlobal.value = false
     return
   }
-  await chrome.storage.local.set({ [CONFIG_KEY]: cfg })
+  await chrome.storage.local.set({ appConfig: cfg })
   globalMsg.value = '已保存'
   savingGlobal.value = false
   setTimeout(() => (globalMsg.value = ''), 2000)
@@ -56,7 +54,8 @@ async function saveGlobal() {
 // ---------- 站点管理 ----------
 
 async function persistConfig() {
-  await chrome.storage.local.set({ [CONFIG_KEY]: config.value })
+  // 深拷贝剥离 Vue reactive Proxy，再交给 chrome.storage（Proxy 直接 set 行为不可靠）
+  await chrome.storage.local.set({ appConfig: JSON.parse(JSON.stringify(config.value)) })
 }
 
 async function addSite() {
