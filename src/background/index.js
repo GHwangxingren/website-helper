@@ -46,32 +46,40 @@ function scanStoragePage() {
       }
     }
   }
-  const out = []
+  const items = []
+  const storageKeys = { localStorage: [], sessionStorage: [] }
+  let error = null
   const grab = (store, area) => {
     let len = 0
-    try { len = store.length } catch (e) { return }
+    try { len = store.length } catch (e) {
+      error = String(e && e.message || e)
+      return
+    }
     for (let i = 0; i < len; i++) {
       const k = store.key(i)
       let v = null
       try { v = store.getItem(k) } catch (e) { continue }
+      storageKeys[area].push(k)
       if (typeof v !== 'string' || !v) continue
       if (looksLikeToken(v) || nameLikeToken(k)) {
-        out.push({
-          area, key, path: [], label: `${area}.${k}`, masked: mask(v),
+        items.push({
+          area, key: k, path: [], label: `${area}.${k}`, masked: mask(v),
           how: looksLikeToken(v) ? (JWT_RE.test(v) ? 'JWT 格式' : '长随机串') : '字段名匹配',
         })
       }
       if (v.trim().startsWith('{') || v.trim().startsWith('[')) {
         try {
           const parsed = JSON.parse(v)
-          if (parsed && typeof parsed === 'object') walk(parsed, area, k, [], out, 1)
+          if (parsed && typeof parsed === 'object') walk(parsed, area, k, [], items, 1)
         } catch (e) { /* ignore */ }
       }
     }
   }
-  try { grab(localStorage, 'localStorage') } catch (e) { /* ignore */ }
-  try { grab(sessionStorage, 'sessionStorage') } catch (e) { /* ignore */ }
-  return out
+  try { grab(window.localStorage, 'localStorage') } catch (e) { error = String(e && e.message || e) }
+  try { grab(window.sessionStorage, 'sessionStorage') } catch (e) { error = String(e && e.message || e) }
+  let frameUrl = ''
+  try { frameUrl = location.href } catch (e) { /* ignore */ }
+  return { frameUrl, storageKeys, items, error }
 }
 
 function readTokensByPaths(paths) {
@@ -90,7 +98,7 @@ function readTokensByPaths(paths) {
   }
   const out = {}
   for (const p of paths) {
-    const store = p.area === 'localStorage' ? localStorage : sessionStorage
+    const store = p.area === 'localStorage' ? window.localStorage : window.sessionStorage
     const v = readPath(store, p)
     const base = `${p.area}.${p.key}`
     const label = p.path && p.path.length ? `${base}.${p.path.join('.')}` : base
@@ -136,18 +144,32 @@ async function doSync(siteId) {
   const tab = await findSiteTab(site)
   if (!tab) return // 站点未打开，页面就绪回调再触发
 
-  let tokens = {}
-  try {
-    const [res] = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
-      world: 'MAIN',
-      func: readTokensByPaths,
-      args: [site.tokenPaths],
-    })
-    tokens = res.result || {}
-  } catch (e) {
-    return // 页面导航中 / 无权限，忽略本次
+  // 按 frameId 分组（候选可能来自 iframe），逐 frame 定点读取后合并
+  const byFrame = new Map() // frameId -> paths[]
+  for (const p of site.tokenPaths) {
+    const fid = Number.isInteger(p.frameId) ? p.frameId : 0
+    if (!byFrame.has(fid)) byFrame.set(fid, [])
+    byFrame.get(fid).push(p)
   }
+
+  let tokens = {}
+  for (const [frameId, paths] of byFrame) {
+    try {
+      const target = frameId === 0
+        ? { tabId: tab.id }
+        : { tabId: tab.id, frameIds: [frameId] }
+      const [res] = await chrome.scripting.executeScript({
+        target,
+        world: 'MAIN',
+        func: readTokensByPaths,
+        args: [paths],
+      })
+      if (res && res.result) tokens = { ...tokens, ...res.result }
+    } catch (e) {
+      // frame 已导航走 / 无权限：跳过该 frame
+    }
+  }
+  if (!Object.keys(tokens).length) return
 
   // 写展示用捕获数据（Popup 展示抓到的数据）
   await setSiteCapture(siteId, {
@@ -155,7 +177,6 @@ async function doSync(siteId) {
     capturedAt: new Date().toISOString(),
     source: 'storage_paths',
   })
-
   if (!site.autoSync) return
   await syncSite(siteId, tokens)
 }
@@ -189,12 +210,40 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (!site) return sendResponse({ ok: false, error: '站点不存在' })
           const tab = await findSiteTab(site)
           if (!tab) return sendResponse({ ok: false, error: '请先在浏览器中打开该网站' })
-          const [res] = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            world: 'MAIN',
-            func: scanStoragePage,
-          })
-          sendResponse({ ok: true, candidates: res.result || [] })
+
+          // 全 frame 注入：政府/门户站点常把登录态写在与主 frame 隔离的 iframe 里，
+          // 只扫 top frame 会漏（token 键就在 DevTools Application 面板可见却扫不到的典型原因）
+          let results = []
+          let diag = []
+          try {
+            results = await chrome.scripting.executeScript({
+              target: { tabId: tab.id, allFrames: true },
+              world: 'MAIN',
+              func: scanStoragePage,
+            })
+          } catch (e) {
+            return sendResponse({ ok: false, error: '扫描注入失败：' + e.message })
+          }
+          const seen = new Set()
+          const candidates = []
+          for (const r of results) {
+            const frameUrl = r.result && r.result.frameUrl ? r.result.frameUrl : ''
+            const list = r.result && Array.isArray(r.result.items) ? r.result.items : []
+            diag.push({
+              frameId: r.frameId,
+              url: frameUrl || '(无法读取)',
+              err: r.result && r.result.error ? r.result.error : null,
+              storageKeys: r.result && r.result.storageKeys ? r.result.storageKeys : [],
+              hits: list.length,
+            })
+            for (const c of list) {
+              const dup = c.label + '|' + c.masked
+              if (seen.has(dup)) continue
+              seen.add(dup)
+              candidates.push({ ...c, frameId: r.frameId, frameUrl })
+            }
+          }
+          sendResponse({ ok: true, candidates, diag })
           return
         }
         case 'SYNC_NOW': {

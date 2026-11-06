@@ -187,11 +187,14 @@ async function removeSite(site) {
 
 // ---------- Token 扫描与确认 ----------
 
+const diag = ref([])
+
 async function scanTokens() {
   if (!selectedSite.value || scanning.value) return
   scanning.value = true
   scanErr.value = ''
   candidates.value = []
+  diag.value = []
   checkedCandidates.value = {}
   try {
     const resp = await chrome.runtime.sendMessage({ type: 'SCAN_TOKENS', siteId: selectedSite.value.id })
@@ -199,8 +202,13 @@ async function scanTokens() {
       scanErr.value = resp.error || '扫描失败'
     } else {
       candidates.value = resp.candidates || []
+      diag.value = resp.diag || []
       if (!candidates.value.length) {
-        scanErr.value = '未发现候选字段。该网站可能使用 IndexedDB、内存变量或其他存储，需站点专项适配（PRD 6.3）。'
+        const frames = diag.value.length
+        const keys = diag.value.reduce((n, d) => n + (d.storageKeys ? d.storageKeys.length : 0), 0)
+        scanErr.value =
+          `未发现候选字段（已扫描 ${frames} 个 frame，共 ${keys} 个 storage 键）。` +
+          `若 DevTools 中能看到 token 键却未命中，请把键名/值前缀发我核对匹配规则。`
       }
     }
   } catch (e) {
@@ -220,7 +228,11 @@ async function saveConfirmedTokens() {
     scanErr.value = '请先勾选要确认的字段'
     return
   }
-  selectedSite.value.tokenPaths = picked.map((c) => ({ area: c.area, key: c.key, path: c.path }))
+  // frameId 一并保存：token 可能在 iframe 的 storage 里，读取时定点注入对应 frame
+  selectedSite.value.tokenPaths = picked.map((c) => ({
+    area: c.area, key: c.key, path: c.path,
+    ...(Number.isInteger(c.frameId) && c.frameId !== 0 ? { frameId: c.frameId } : {}),
+  }))
   selectedSite.value.syncState = { ...selectedSite.value.syncState, status: 'ENABLED' }
   await persistConfig()
   siteMsg.value = `已确认 ${picked.length} 个字段，登录网站后自动捕获`
@@ -318,14 +330,28 @@ const STATUS_TEXT = {
 
         <div v-if="candidates.length" class="candidates">
           <p class="dim">2. 勾选真正用于认证的字段并保存：</p>
-          <label v-for="(c, i) in candidates" :key="c.label" class="cand">
+          <label v-for="(c, i) in candidates" :key="c.label + '|' + c.frameId" class="cand">
             <input v-model="checkedCandidates[i]" type="checkbox">
             <span class="cand-label">{{ c.label }}</span>
             <span class="cand-val">{{ c.masked }}</span>
             <span class="cand-how">{{ c.how }}</span>
+            <span v-if="c.frameId !== 0" class="frame-tag" :title="c.frameUrl">iframe#{{ c.frameId }}</span>
           </label>
           <button class="btn" @click="saveConfirmedTokens">保存已确认字段</button>
         </div>
+
+        <details v-if="diag.length" class="diag-box">
+          <summary class="dim">扫描诊断（{{ diag.length }} 个 frame）</summary>
+          <div v-for="(d, i) in diag" :key="i" class="diag-row">
+            <div>frame#{{ d.frameId }}: {{ d.url }}</div>
+            <div class="dim">
+              localStorage {{ (d.storageKeys || []).length }} 键 · 命中 {{ d.hits }}
+              <template v-if="d.err"> · 错误: {{ d.err }}</template>
+            </div>
+            <div v-if="d.storageKeys && d.storageKeys.length" class="dim keys">{{ d.storageKeys.join(', ') }}</div>
+          </div>
+        </details>
+
         <p v-if="scanErr" class="err">{{ scanErr }}</p>
       </section>
     </template>
@@ -405,4 +431,16 @@ input:focus { outline: none; border-color: #534AB7; }
 .cand-label { flex: 1; font-family: Consolas, monospace; font-size: 11px; color: #534AB7; word-break: break-all; }
 .cand-val { font-family: Consolas, monospace; font-size: 11px; color: #333; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cand-how { font-size: 10px; color: #999; white-space: nowrap; }
+.frame-tag {
+  font-size: 10px; color: #185FA5; background: #E6F1FB;
+  border-radius: 3px; padding: 1px 5px; white-space: nowrap;
+}
+.diag-box { margin-top: 12px; }
+.diag-box summary { cursor: pointer; }
+.diag-row {
+  margin-top: 8px; padding: 6px 8px; background: #fff;
+  border: 1px solid #eee; border-radius: 6px; font-size: 11px;
+  font-family: Consolas, monospace; word-break: break-all;
+}
+.diag-row .keys { margin-top: 2px; }
 </style>
